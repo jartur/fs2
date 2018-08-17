@@ -24,13 +24,35 @@ import scala.util.control.NonFatal
   *
   *
   */
+
+
+// A simplified overview of types
+
+// data FreeC f r =
+//   | Pure r
+//   | Fail Throwable
+//   | Interrupted ctx (Maybe Throwable)
+//   | Eval (f r)
+//   | Bind (FreeC f a) (Result a -> FreeC f r)
+
+// data Result r = Pure r | Fail Throwable | Interrupted ctx (Maybe Throwable)
+// data ViewL f r = Pure r | Fail Throwable | Interrupted ctx (Maybe Throwable)
+//                  | View (f x) (Result x -> FreeC f r)
+// Note how the same data constructors (case classes) are used to construct values of 3 different types
 private[fs2] sealed abstract class FreeC[F[_], +R] {
 
+  // flatMap :: { this : FreeC f r } -> (r -> FreeC f r2) -> FreeC f r2
+  // This is the monadic bind
   def flatMap[R2](f: R => FreeC[F, R2]): FreeC[F, R2] =
+    // Construct new FreeC value of Bind variant
+    // Note how this is stack safe because we return a value immediately, nothing is computed when we call flatMap
     Bind[F, R, R2](
       this,
+      // Result r -> FreeC f r2
       e =>
         e match {
+          // Unpack the result of the previous computation and either process it with the supplied function
+          // or propagate the error, essentially just casting to the proper ADT
           case Result.Pure(r) =>
             try f(r)
             catch { case NonFatal(e) => FreeC.Result.Fail(e) }
