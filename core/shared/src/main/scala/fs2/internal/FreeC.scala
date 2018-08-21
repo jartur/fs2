@@ -38,7 +38,8 @@ import scala.util.control.NonFatal
 // data Result r = Pure r | Fail Throwable | Interrupted ctx (Maybe Throwable)
 // data ViewL f r = Pure r | Fail Throwable | Interrupted ctx (Maybe Throwable)
 //                  | View (f x) (Result x -> FreeC f r)
-// Note how the same data constructors (case classes) are used to construct values of 3 different types
+// Note how the same data constructors (case classes) are used to construct values of 3 different types, this is 
+// possible due to subtyping and the fact that in Scala case classes do actually have their own types.
 private[fs2] sealed abstract class FreeC[F[_], +R] {
 
   // flatMap :: { this : FreeC f r } -> (r -> FreeC f r2) -> FreeC f r2
@@ -61,14 +62,25 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
       }
     )
 
+  // transformWith :: { this : FreeC f r } -> (Result r -> FreeC f r2) -> FreeC f r2
+  // Same as flatMap but takes a function from `Result r` directly to construct a `Bind` variant.
   def transformWith[R2](f: Result[R] => FreeC[F, R2]): FreeC[F, R2] =
     Bind[F, R, R2](this,
                    r =>
                      try f(r)
                      catch { case NonFatal(e) => FreeC.Result.Fail(e) })
 
+  // map :: { this : FreeC f r } -> (r -> r2) -> FreeC f r2
+  // Transforms the content of this FreeC
   def map[R2](f: R => R2): FreeC[F, R2] =
-    Bind[F, R, R2](this, Result.monadInstance.map(_)(f).asFreeC[F])
+    // `map` is implemented with `Bind`, essentially `flatMap`
+    // To do this we need to turn `r -> r2` into `Result r -> FreeC f r2`
+    // We get `map :: Result r -> (r -> r2) -> Result r2` from the `Result` Monad instance
+    // Then with help of some underscore magic we partially apply it to the second argument
+    // and cast the result to `FreeC f r2` getting a new function of the exact type we need
+    Bind[F, R, R2](this, 
+                   // Can be written as `r => Result.monadInstance.map(r)(f).asFreeC[F]`
+                   Result.monadInstance.map(_)(f).asFreeC[F])
 
   def handleErrorWith[R2 >: R](h: Throwable => FreeC[F, R2]): FreeC[F, R2] =
     Bind[F, R2, R2](this,
