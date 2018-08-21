@@ -81,7 +81,11 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
     Bind[F, R, R2](this, 
                    // Can be written as `r => Result.monadInstance.map(r)(f).asFreeC[F]`
                    Result.monadInstance.map(_)(f).asFreeC[F])
-
+  
+  // handleErrorWith :: { this: FreeC f r } -> (Throwable -> FreeC f r2) -> FreeC f r2
+  // Recover from an error state or do nothing.
+  // Notice that r2 must be a supertype of r.
+  // E.g. `r = String /\ r2 = Object` but `~(r = String /\ r2 = Int)`
   def handleErrorWith[R2 >: R](h: Throwable => FreeC[F, R2]): FreeC[F, R2] =
     Bind[F, R2, R2](this,
                     e =>
@@ -89,23 +93,48 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
                         case Result.Fail(e) =>
                           try h(e)
                           catch { case NonFatal(e) => FreeC.Result.Fail(e) }
+                        // Here we use the fact that r2 is a supertype of r, we can always upcast safely.
                         case other => other.covary[R2].asFreeC[F]
                     })
 
-  def asHandler(e: Throwable): FreeC[F, R] = ViewL(this) match {
+  // asHandler :: { this : FreeC f r } -> Throwable -> FreeC f r
+  // TODO Looks like it injects a failure in the middle of a FreeC computation
+  def asHandler(e: Throwable): FreeC[F, R] = 
+  // unroll `FreeC f r` into `ViewL f r`
+  ViewL(this) match {
+    // Normal result translates into the provided faliure
     case Result.Pure(_)  => Result.Fail(e)
+    // Failure translates into a composite failure containing the provided one
     case Result.Fail(e2) => Result.Fail(CompositeFailure(e2, e))
+    // Interruption translates into interruption with the provided failure contained in the error part
     case Result.Interrupted(ctx, err) =>
       Result.Interrupted(ctx, err.map(t => CompositeFailure(e, t)).orElse(Some(e)))
+    // A View ignores the current value and passes the provided failure to the next step instead
     case ViewL.View(_, k) => k(Result.Fail(e))
   }
 
+  // viewL :: { this : FreeC f r } -> ViewL f r2
+  // Unroll this `FreeC` into a `ViewL`
   def viewL[R2 >: R]: ViewL[F, R2] = ViewL(this)
 
+  // translate :: { this : FreeC f r } -> (F ~> G) -> FreeC g r
+  // Change the underlying functor from F to G provided a natural transformation `F ~> G`
   def translate[G[_]](f: F ~> G): FreeC[G, R] = FreeC.suspend {
+    // This block is provided as a by-name argument to the `suspend` above
+    // so again nothing is run at the point of construction,
+    // the resulting `FreeC g r` will be a `Bind` with this block as the result value.
+    
+    // We first unroll the current `FreeC f r` into a `ViewL f r2` for any r2 >: r
     viewL match {
+      // fx :: f x -- current step.
+      // k :: Result x -> FreeC f r2 -- next step
       case ViewL.View(fx, k) =>
+        // Eval fx :: FreeC f x, eval takes a functorial value and constructs a FreeC over it
+        // Then we translate it to `G` recursively
+        // TODO How do the types work out? Find info about NT in Scala
+        // TODO What is this `Result Any` magic?
         Bind(Eval(fx).translate(f), (e: Result[Any]) => k(e).translate(f))
+      // Any `Result` case class can be just upcast to `Free g` because they don't depend on the functor
       case r @ Result.Pure(_)           => r.asFreeC[G]
       case r @ Result.Fail(_)           => r.asFreeC[G]
       case r @ Result.Interrupted(_, _) => r.asFreeC[G]
@@ -237,10 +266,16 @@ private[fs2] object FreeC {
     override def toString: String = s"FreeC.Bind($fx, $f)"
   }
 
+  // pureContinuation :: forall f. Result r -> FreeC f r
+  // Turns `Result` into `FreeC f`
   def pureContinuation[F[_], R]: Result[R] => FreeC[F, R] =
     _.asFreeC[F]
 
+  // suspend :: ( () -> FreeC f r ) -> FreeC f r
+  // Takes a by-name FreeC value and returns a FreeC value that will result in the provided value when "run"
   def suspend[F[_], R](fr: => FreeC[F, R]): FreeC[F, R] =
+    // Just flatmap over a unit Result, this will construct a `Bind` varian of `FreeC`
+    // with provided computation as the result.
     Result.Pure[F, Unit](()).flatMap(_ => fr)
 
   /**
@@ -254,6 +289,8 @@ private[fs2] object FreeC {
     final case class View[F[_], X, R](step: F[X], next: Result[X] => FreeC[F, R])
         extends ViewL[F, R]
 
+    // apply :: FreeC f r -> ViewL f r
+    // Unrolls the provided `FreeC f r` into a `ViewL f r`
     private[fs2] def apply[F[_], R](free: FreeC[F, R]): ViewL[F, R] = mk(free)
 
     @tailrec
