@@ -114,25 +114,31 @@ private[fs2] sealed abstract class FreeC[F[_], +R] {
   }
 
   // viewL :: { this : FreeC f r } -> ViewL f r2
-  // Unroll this `FreeC` into a `ViewL`
+  // Unroll this `FreeC` into a `ViewL` potentially upcasting the result type
   def viewL[R2 >: R]: ViewL[F, R2] = ViewL(this)
 
   // translate :: { this : FreeC f r } -> (F ~> G) -> FreeC g r
-  // Change the underlying functor from F to G provided a natural transformation `F ~> G`
+  // Change the underlying functor from F to G provided a transformation `F ~> G`
+  // Note that this implementation is overridden in all cases except `Bind`
   def translate[G[_]](f: F ~> G): FreeC[G, R] = FreeC.suspend {
     // This block is provided as a by-name argument to the `suspend` above
     // so again nothing is run at the point of construction,
     // the resulting `FreeC g r` will be a `Bind` with this block as the result value.
     
-    // We first unroll the current `FreeC f r` into a `ViewL f r2` for any r2 >: r
+    // We first unroll the current `FreeC f r` into a `ViewL f r2` for any `r2 >: r`, it will unify to the original type `r`
     viewL match {
-      // fx :: f x -- current step.
-      // k :: Result x -> FreeC f r2 -- next step
+      // `fx :: f Any` -- current step.
+      // `k :: Result Any -> FreeC f r` -- next step
       case ViewL.View(fx, k) =>
-        // Eval fx :: FreeC f x, eval takes a functorial value and constructs a FreeC over it
-        // Then we translate it to `G` recursively
-        // TODO How do the types work out? Find info about NT in Scala
-        // TODO What is this `Result Any` magic?
+        // `Eval fx :: FreeC f Any`
+        // Then we translate it to `G` recursively, if `fx` is not `Bind` it will just return the translated value and stop recursion.
+        // In a sense we step from the end of our bind-chain to its beginning? TODO
+        // So the first argument has type `FreeC g Any`
+        // `e :: Result Any` |- `k e :: FreeC f r`, then we `translate` it into `FreeC g r`
+        // So the second argument to bind has type `Result Any -> FreeC g r`
+        // Hence `Bind(...)` has type `FreeC G r`
+        // So we replaced all the "sources" of values to be under new functor and all the "continuations" to produce their results
+        // into the new functor, thus translating this `FreeC` to use the new functor.
         Bind(Eval(fx).translate(f), (e: Result[Any]) => k(e).translate(f))
       // Any `Result` case class can be just upcast to `Free g` because they don't depend on the functor
       case r @ Result.Pure(_)           => r.asFreeC[G]
